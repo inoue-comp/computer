@@ -1,0 +1,142 @@
+// ===== ピン設定 =====
+const int ledPins[3] = {13, 12, 10};
+const int buttonPin = 11;
+const int speakerPin = 9;
+
+// ===== スロット設定 =====
+const int reelLength = 4;
+int reelPattern[reelLength] = {440, 494, 523, 587};
+
+// 状態
+int reelPos[3] = {0, 1, 2};
+bool stopFlag[3] = {false, false, false};
+
+int stopCount = 0;
+bool running = false;
+
+// ボタン管理
+bool lastButton = HIGH;
+unsigned long lastDebounce = 0;
+const int debounceTime = 50;
+
+void setup() {
+  // LED
+  for (int i = 0; i < 3; i++) {
+    pinMode(ledPins[i], OUTPUT);
+  }
+
+  // ボタン
+  pinMode(buttonPin, INPUT_PULLUP);
+
+  // スピーカー
+  pinMode(speakerPin, OUTPUT);
+}
+
+// ===== メインループ =====
+void loop() {
+  handleButton();
+
+  if (running) {
+    updateReels();
+    playSound();
+    updateLED();
+  }
+}
+
+// ===== ボタン処理 =====
+void handleButton() {
+  bool reading = digitalRead(buttonPin);
+
+  if (reading != lastButton) {
+    lastDebounce = millis();
+  }
+
+  if ((millis() - lastDebounce) > debounceTime) {
+    if (reading == LOW && lastButton == HIGH) {
+      onButtonPressed();
+    }
+  }
+
+  lastButton = reading;
+}
+
+// ===== ボタン押下時 =====
+void onButtonPressed() {
+  if (!running) {
+    // スタート
+    running = true;
+    stopCount = 0;
+
+    for (int i = 0; i < 3; i++) {
+      stopFlag[i] = false;
+    }
+
+  } else {
+    // 順番に停止
+    if (stopCount < 3) {
+      stopFlag[stopCount] = true;
+      stopCount++;
+    }
+
+    // 全停止
+    if (stopCount == 3) {
+      running = false;
+      judge();
+    }
+  }
+}
+
+// ===== リール更新 =====
+void updateReels() {
+  static unsigned long lastUpdate = 0;
+
+  if (millis() - lastUpdate > 100) {  // スピード調整
+    for (int i = 0; i < 3; i++) {
+      if (!stopFlag[i]) {
+        reelPos[i] = (reelPos[i] + 1) % reelLength;
+      }
+    }
+    lastUpdate = millis();
+  }
+}
+
+// ===== 音再生（3音っぽくする） =====
+void playSound() {
+  for (int i = 0; i < 3; i++) {
+    if (!stopFlag[i]) {
+      tone(speakerPin, reelPattern[reelPos[i]]);
+      delayMicroseconds(800);
+    }
+  }
+}
+
+// ===== LED表示 =====
+void updateLED() {
+  for (int i = 0; i < 3; i++) {
+    if (stopFlag[i]) {
+      digitalWrite(ledPins[i], HIGH);
+    } else {
+      digitalWrite(ledPins[i], HIGH);
+      delay(10);
+      digitalWrite(ledPins[i], LOW);
+    }
+  }
+}
+
+// ===== 判定 =====
+void judge() {
+  if (reelPos[0] == reelPos[1] && reelPos[1] == reelPos[2]) {
+    // 🎉 当たり
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(ledPins[i], HIGH);
+    }
+
+    tone(speakerPin, 1000, 300);
+    delay(400);
+
+  } else {
+    // ❌ ハズレ
+    tone(speakerPin, 200, 200);
+    delay(300);
+  }
+}

@@ -1,0 +1,65 @@
+// ==== ピン設定 ====
+int motorPin = 9;
+int btnMode = 2;
+int btnRhythm = 3;
+
+// ==== 状態 ====
+int mode = 0;
+bool rhythm = false;
+
+bool lastModeState = HIGH;
+bool lastRhythmState = HIGH;
+
+unsigned long lastChange = 0;
+int pwmValue = 0;
+
+void setup() {
+  pinMode(motorPin, OUTPUT);
+  pinMode(btnMode, INPUT_PULLUP);
+  pinMode(btnRhythm, INPUT_PULLUP);
+
+  randomSeed(analogRead(0));
+}
+
+void loop() {
+
+  bool currentMode = digitalRead(btnMode);
+  bool currentRhythm = digitalRead(btnRhythm);
+
+  // 風量切替
+  if (lastModeState == HIGH && currentMode == LOW) {
+    mode++;
+    if (mode > 3) mode = 0;
+  }
+
+  // リズム切替
+  if (lastRhythmState == HIGH && currentRhythm == LOW) {
+    rhythm = !rhythm;
+  }
+
+  lastModeState = currentMode;
+  lastRhythmState = currentRhythm;
+
+  // 基本速度
+  int baseSpeed = 0;
+
+  if (mode == 1) baseSpeed = 80;
+  if (mode == 2) baseSpeed = 150;
+  if (mode == 3) baseSpeed = 255;
+
+  // リズム
+  if (rhythm && baseSpeed > 0) {
+    unsigned long now = millis();
+
+    if (now - lastChange > 800) {
+      pwmValue = random(baseSpeed / 2, baseSpeed + 1);
+      lastChange = now;
+    }
+  } else {
+    pwmValue = baseSpeed;
+  }
+
+  analogWrite(motorPin, pwmValue);
+
+  delay(50); // 安定化（推奨）
+}
