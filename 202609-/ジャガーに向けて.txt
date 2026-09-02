@@ -1,0 +1,407 @@
+using System;
+using Raylib_cs;
+using System.Numerics;
+
+namespace SpoChanBeltScroll
+{
+    class Program
+    {
+        const int ScreenWidth = 800;
+        const int ScreenHeight = 450;
+
+        // 物理・移動パラメーター
+        const float Gravity = 1800.0f;       
+        const float MoveSpeedX = 350.0f;     
+        const float MoveSpeedZ = 200.0f;     
+        const float JumpForce = -600.0f;     
+
+        const float PlayAreaTop = 250.0f;
+        const float PlayAreaBottom = 420.0f;
+
+        // コンボシステムの設定
+        const float ComboResetTime = 1.0f;   
+        const float FinisherDelay = 0.6f;    
+
+        enum AttackType { None, FrontSlash, HorizontalSlash, Thrust }
+
+        struct Character
+        {
+            public float X;      
+            public float Z;      
+            public float Y;      
+            public float VelocityX;
+            public float VelocityZ;
+            public float VelocityY;
+            public float Width;
+            public float Height;
+            public bool IsGrounded;
+            public float Facing;
+
+            // 攻撃・コンボ管理用
+            public AttackType CurrentAttack;
+            public int ComboStage;           
+            public float AttackTimer;        
+            public float ComboTimer;         
+            public float DelayTimer;         
+
+            // 踏み込みの滑らかな移動（スムースダッシュ）用
+            public float TargetDashX;        // 踏み込みの目標X座標
+            public float DashSpeedX;         // スライド移動の速度
+            public bool IsDashing;           // 踏み込みスライド中か
+
+            // 空中での3段目予約フラグ
+            public bool IsThrustBuffered;
+
+            // 攻撃判定データ
+            public Vector2 AttackCheckCenter; 
+            public float AttackRadius;
+            public float AttackMinY;         
+            public float AttackMaxY;         
+            public bool IsAttackActive;
+
+            public float HitStunTimer;       
+        }
+
+        struct DamageText
+        {
+            public float X;
+            public float Z;
+            public float Y;
+            public float VelocityY;
+            public string Text;
+            public float Lifetime;
+            public bool IsActive;
+        }
+
+        static void Main(string[] args)
+        {
+            Raylib.InitWindow(ScreenWidth, ScreenHeight, "SpoChan - Refined Feel Prototype");
+            Raylib.SetTargetFPS(60);
+
+            Character player = new Character
+            {
+                X = 150,
+                Z = (PlayAreaTop + PlayAreaBottom) / 2,
+                Y = 0,
+                Width = 30,
+                Height = 60,
+                IsGrounded = true,
+                Facing = 1.0f,
+                CurrentAttack = AttackType.None
+            };
+
+            Character dummy = new Character
+            {
+                X = 550,
+                Z = (PlayAreaTop + PlayAreaBottom) / 2,
+                Y = 0,
+                Width = 30,
+                Height = 60,
+                IsGrounded = true,
+                Facing = -1.0f,
+                CurrentAttack = AttackType.None
+            };
+
+            DamageText dmgText = new DamageText { IsActive = false };
+            bool hasHitRegistered = false;
+
+            while (!Raylib.WindowShouldClose())
+            {
+                float deltaTime = Raylib.GetFrameTime();
+
+                // ---------------------------------------------------
+                // タイマー・演出類の更新
+                // ---------------------------------------------------
+                if (player.AttackTimer > 0)
+                {
+                    player.AttackTimer -= deltaTime;
+                    if (player.AttackTimer <= 0) player.IsAttackActive = false;
+                }
+                if (player.ComboTimer > 0)
+                {
+                    player.ComboTimer -= deltaTime;
+                    if (player.ComboTimer <= 0 && player.ComboStage < 3) player.ComboStage = 0;
+                }
+                if (player.DelayTimer > 0) player.DelayTimer -= deltaTime;
+                if (dummy.HitStunTimer > 0) dummy.HitStunTimer -= deltaTime;
+
+                if (dmgText.IsActive)
+                {
+                    dmgText.VelocityY += 1200.0f * deltaTime; 
+                    dmgText.Y += dmgText.VelocityY * deltaTime;
+                    dmgText.Lifetime -= deltaTime;
+                    if (dmgText.Lifetime <= 0) dmgText.IsActive = false;
+                }
+
+                // ---------------------------------------------------
+                // 1. 入力処理 & 攻撃発動ロジック
+                // ---------------------------------------------------
+                player.VelocityX = 0;
+                player.VelocityZ = 0;
+
+                // 攻撃中、硬直中、および「踏み込みスライド中」は通常の移動入力を受け付けない
+                bool canMove = (player.AttackTimer <= 0) && (player.DelayTimer <= 0) && !player.IsDashing;
+
+                if (canMove)
+                {
+                    if (Raylib.IsKeyDown(KeyboardKey.Left) || Raylib.IsKeyDown(KeyboardKey.A))
+                    {
+                        player.VelocityX = -MoveSpeedX;
+                        player.Facing = -1.0f;
+                    }
+                    if (Raylib.IsKeyDown(KeyboardKey.Right) || Raylib.IsKeyDown(KeyboardKey.D))
+                    {
+                        player.VelocityX = MoveSpeedX;
+                        player.Facing = 1.0f;
+                    }
+                    if (Raylib.IsKeyDown(KeyboardKey.Up) || Raylib.IsKeyDown(KeyboardKey.W))    player.VelocityZ = -MoveSpeedZ;
+                    if (Raylib.IsKeyDown(KeyboardKey.Down) || Raylib.IsKeyDown(KeyboardKey.S))  player.VelocityZ = MoveSpeedZ;
+
+                    if (Raylib.IsKeyPressed(KeyboardKey.Space) && player.IsGrounded)
+                    {
+                        player.VelocityY = JumpForce;
+                        player.IsGrounded = false;
+                    }
+                }
+
+                // 攻撃ボタンが押されたとき（空中・地上問わず受付）
+                if ((Raylib.IsKeyPressed(KeyboardKey.J) || Raylib.IsKeyPressed(KeyboardKey.Z) || Raylib.IsMouseButtonPressed(MouseButton.Left)) && canMove)
+                {
+                    // 次のコンボステージの決定
+                    int nextStage = player.ComboStage == 0 || player.ComboStage == 3 ? 1 : player.ComboStage + 1;
+
+                    // 【修正点】空中で3段目（突き）を入力した場合は予約フラグを立て、実際の処理を保留する
+                    if (!player.IsGrounded && nextStage == 3)
+                    {
+                        player.IsThrustBuffered = true;
+                    }
+                    else
+                    {
+                        // 通常の攻撃発動関数を呼び出す
+                        TriggerAttack(ref player, nextStage, ref hasHitRegistered);
+                    }
+                }
+
+                // ---------------------------------------------------
+                // 2. 物理演算 & 位置更新（スライド移動の処理含む）
+                // ---------------------------------------------------
+                
+                // 【修正点：瞬間移動対策】踏み込みダッシュ中の滑らかな座標移動
+                if (player.IsDashing)
+                {
+                    // 目標地点に向かって超高速で移動させる
+                    float step = player.DashSpeedX * deltaTime;
+                    if (MathF.Abs(player.TargetDashX - player.X) <= MathF.Abs(step))
+                    {
+                        player.X = player.TargetDashX;
+                        player.IsDashing = false; // 到着
+                    }
+                    else
+                    {
+                        player.X += step;
+                    }
+                }
+                else
+                {
+                    // 通常の左右移動
+                    player.X += player.VelocityX * deltaTime;
+                }
+
+                // 奥行き移動
+                player.Z += player.VelocityZ * deltaTime;
+
+                // 重力処理
+                if (!player.IsGrounded)
+                {
+                    player.VelocityY += Gravity * deltaTime;
+                    player.Y += player.VelocityY * deltaTime;
+                }
+
+                // 攻撃中（判定発生中）は、攻撃の中心座標をプレイヤーの位置に追従させる
+                if (player.IsAttackActive)
+                {
+                    float offset = player.ComboStage == 1 ? 40.0f : (player.ComboStage == 2 ? 20.0f : 75.0f);
+                    player.AttackCheckCenter = new Vector2(player.X + (player.Width / 2) + (offset * player.Facing), player.Z);
+                }
+
+                // 壁・床の制限
+                if (player.Z < PlayAreaTop) player.Z = PlayAreaTop;
+                if (player.Z > PlayAreaBottom) player.Z = PlayAreaBottom;
+                if (player.X < 0) player.X = 0;
+                if (player.X + player.Width > ScreenWidth) player.X = ScreenWidth - player.Width;
+
+                // 【修正点】着地判定と3段目予約の消化
+                if (player.Y >= 0) 
+                { 
+                    player.Y = 0; 
+                    player.VelocityY = 0; 
+                    player.IsGrounded = true; 
+
+                    // 空中で3段目を予約していた場合、着地した瞬間にディレイなしで即時発動！
+                    if (player.IsThrustBuffered)
+                    {
+                        player.IsThrustBuffered = false;
+                        TriggerAttack(ref player, 3, ref hasHitRegistered);
+                    }
+                }
+
+                // ダミーのジャンプ更新
+                if (Raylib.IsKeyPressed(KeyboardKey.O) && dummy.IsGrounded)
+                {
+                    dummy.VelocityY = JumpForce;
+                    dummy.IsGrounded = false;
+                }
+                if (!dummy.IsGrounded)
+                {
+                    dummy.VelocityY += Gravity * deltaTime;
+                    dummy.Y += dummy.VelocityY * deltaTime;
+                }
+                if (dummy.Y >= 0) { dummy.Y = 0; dummy.VelocityY = 0; dummy.IsGrounded = true; }
+
+                // ---------------------------------------------------
+                // 衝突判定チェック
+                // ---------------------------------------------------
+                if (player.IsAttackActive && !hasHitRegistered)
+                {
+                    float distX = player.AttackCheckCenter.X - (dummy.X + dummy.Width / 2);
+                    float distZ = player.AttackCheckCenter.Y - dummy.Z;
+                    float distanceFlat = MathF.Sqrt(distX * distX + distZ * distZ);
+
+                    if (distanceFlat <= player.AttackRadius)
+                    {
+                        float dummyTop = dummy.Y - dummy.Height; 
+                        float dummyBottom = dummy.Y;             
+
+                        bool isYHit = (player.AttackMinY <= dummyBottom) && (player.AttackMaxY >= dummyTop);
+
+                        if (isYHit)
+                        {
+                            dummy.HitStunTimer = 0.15f; 
+                            hasHitRegistered = true;
+
+                            string hitName = player.CurrentAttack == AttackType.FrontSlash ? "FRONT HIT!" : 
+                                             player.CurrentAttack == AttackType.HorizontalSlash ? "NAGI HIT!" : "THRUST HIT!";
+                            dmgText = new DamageText
+                            {
+                                X = dummy.X, Z = dummy.Z, Y = dummy.Y - dummy.Height - 10,
+                                VelocityY = -350.0f, Text = hitName, Lifetime = 0.5f, IsActive = true
+                            };
+                        }
+                    }
+                }
+
+                // ---------------------------------------------------
+                // 3. 描画処理
+                // ---------------------------------------------------
+                Raylib.BeginDrawing();
+                Raylib.ClearBackground(Color.White);
+
+                Raylib.DrawRectangle(0, (int)PlayAreaTop, ScreenWidth, (int)(PlayAreaBottom - PlayAreaTop), Color.LightGray);
+                Raylib.DrawLine(0, (int)PlayAreaTop, ScreenWidth, (int)PlayAreaTop, Color.Gray);
+                Raylib.DrawLine(0, (int)PlayAreaBottom, ScreenWidth, (int)PlayAreaBottom, Color.Gray);
+
+                Raylib.DrawEllipse((int)(player.X + player.Width / 2), (int)player.Z, player.Width / 2, 8, Raylib.Fade(Color.DarkGray, 0.4f));
+                Raylib.DrawEllipse((int)(dummy.X + dummy.Width / 2), (int)dummy.Z, dummy.Width / 2, 8, Raylib.Fade(Color.DarkGray, 0.4f));
+
+                if (player.IsAttackActive)
+                {
+                    Color indicatorColor = Raylib.Fade(Color.Red, 0.4f);
+                    if (player.CurrentAttack == AttackType.HorizontalSlash && player.Y < player.AttackMinY)
+                    {
+                        indicatorColor = Raylib.Fade(Color.Green, 0.3f); 
+                    }
+
+                    Raylib.DrawEllipse((int)player.AttackCheckCenter.X, (int)player.AttackCheckCenter.Y, (int)player.AttackRadius, (int)(player.AttackRadius * 0.4f), indicatorColor);
+                }
+
+                // プレイヤー描画
+                float pScreenX = player.X;
+                float pScreenY = player.Z + player.Y - player.Height;
+                Color pColor = player.DelayTimer > 0 ? Color.DarkGray : (player.IsAttackActive ? Color.Red : Color.Maroon);
+                Raylib.DrawRectangleRec(new Rectangle(pScreenX, pScreenY, player.Width, player.Height), pColor);
+                float pEyeX = player.Facing == 1.0f ? player.Width - 8 : 2;
+                Raylib.DrawRectangle((int)(pScreenX + pEyeX), (int)(pScreenY + 10), 6, 6, Color.Black);
+
+                // ダミー人形描画
+                float dScreenX = dummy.X;
+                float dScreenY = dummy.Z + dummy.Y - dummy.Height;
+                Color dColor = dummy.HitStunTimer > 0 ? Color.Orange : Color.DarkBlue;
+                Raylib.DrawRectangleRec(new Rectangle(dScreenX, dScreenY, dummy.Width, dummy.Height), dColor);
+                float dEyeX = dummy.Facing == 1.0f ? dummy.Width - 8 : 2;
+                Raylib.DrawRectangle((int)(dScreenX + dEyeX), (int)(dScreenY + 10), 6, 6, Color.Black);
+
+                if (dmgText.IsActive)
+                {
+                    float tScreenY = dmgText.Z + dmgText.Y;
+                    Raylib.DrawText(dmgText.Text, (int)dmgText.X - 20, (int)tScreenY, 20, Color.Orange);
+                }
+
+                // UI
+                Raylib.DrawText("Player: WASD/Arrows + Space | J/Z/LeftClick (Attack)", 10, 10, 18, Color.DarkGray);
+                
+                string infoStr = player.ComboStage == 0 ? "Ready" : $"Stage {player.ComboStage}: {player.CurrentAttack}";
+                if (player.IsThrustBuffered) infoStr += " (Buffered Thrust...)";
+                else if (player.DelayTimer > 0) infoStr += " (COOL DOWN)";
+                Raylib.DrawText($"Combo: {infoStr}", 10, 35, 20, Color.DarkGreen);
+
+                Raylib.EndDrawing();
+            }
+
+            Raylib.CloseWindow();
+        }
+
+        // ---------------------------------------------------
+        // 🛠️ 攻撃発動処理の共通メソッド（空中・地上判定を一括制御）
+        // ---------------------------------------------------
+        static void TriggerAttack(ref Character p, int stage, ref bool hitFlag)
+        {
+            p.ComboStage = stage;
+            p.AttackTimer = 0.15f; 
+            p.IsAttackActive = true;
+            p.ComboTimer = ComboResetTime;
+            hitFlag = false; 
+
+            switch (p.ComboStage)
+            {
+                case 1: 
+                    p.CurrentAttack = AttackType.FrontSlash;
+                    
+                    // 【修正点】地面にいるときだけ踏み込みダッシュを行う（空中では移動なし）
+                    if (p.IsGrounded)
+                    {
+                        p.IsDashing = true;
+                        p.TargetDashX = p.X + (50.0f * p.Facing);
+                        // 0.05秒程度で目標値に到達する超高速スライド（瞬間ワープを滑らかに見せる）
+                        p.DashSpeedX = (50.0f * p.Facing) / 0.05f; 
+                    }
+                    
+                    p.AttackRadius = 55.0f;
+                    p.AttackMinY = -200.0f; 
+                    p.AttackMaxY = 10.0f;
+                    break;
+
+                case 2: 
+                    p.CurrentAttack = AttackType.HorizontalSlash;
+                    p.AttackRadius = 80.0f;
+                    p.AttackMinY = -25.0f; 
+                    p.AttackMaxY = 10.0f;
+                    break;
+
+                case 3: 
+                    p.CurrentAttack = AttackType.Thrust;
+                    
+                    // 3段目は必ず着地後にしか発動しないため、確定で踏み込みスライドを行う
+                    p.IsDashing = true;
+                    p.TargetDashX = p.X + (80.0f * p.Facing);
+                    p.DashSpeedX = (80.0f * p.Facing) / 0.05f;
+
+                    p.AttackRadius = 30.0f;
+                    p.AttackMinY = -55.0f;
+                    p.AttackMaxY = -20.0f;
+                    
+                    p.DelayTimer = FinisherDelay;
+                    break;
+            }
+        }
+    }
+}

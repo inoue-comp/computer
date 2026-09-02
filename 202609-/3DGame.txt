@@ -1,0 +1,248 @@
+using Raylib_cs;
+using System;
+using System.Numerics;
+using System.Collections.Generic;
+
+namespace _3DGame
+{
+    struct Block
+    {
+        public Vector3 Position;
+        public Vector3 Size;
+        public Color Color;
+
+        public Block(Vector3 pos, Vector3 size, Color color)
+        {
+            Position = pos;
+            Size = size;
+            Color = color;
+        }
+
+        public BoundingBox GetBoundingBox()
+        {
+            Vector3 halfSize = Size / 2.0f;
+            return new BoundingBox(Position - halfSize, Position + halfSize);
+        }
+    }
+
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            const int screenWidth = 1280;
+            const int screenHeight = 720;
+            Raylib.InitWindow(screenWidth, screenHeight, "3D Action - Fixed Collision & Direction");
+            Raylib.SetTargetFPS(60);
+            Raylib.DisableCursor();
+
+            // --- プレイヤー変数 ---
+            Vector3 playerSize = new Vector3(1.0f, 2.0f, 1.0f);
+            Vector3 playerPos = new Vector3(0.0f, playerSize.Y / 2.0f, 0.0f);
+            float playerAngle = 0.0f;
+            float moveSpeed = 8.0f;
+
+            // --- 物理変数 ---
+            float velocityY = 0.0f;
+            float gravity = -28.0f;
+            float jumpForce = 12.0f;
+            bool isGrounded = false;
+            float groundY = 0.0f;
+
+            // --- ステージ構成物 ---
+            List<Block> blocks = new List<Block>
+            {
+                new Block(new Vector3(0.0f, 1.0f, -5.0f), new Vector3(4.0f, 2.0f, 4.0f), Color.DarkBlue),
+                new Block(new Vector3(5.0f, 2.0f, -5.0f), new Vector3(4.0f, 4.0f, 4.0f), Color.DarkGreen),
+                new Block(new Vector3(-5.0f, 1.5f, 0.0f), new Vector3(2.0f, 3.0f, 6.0f), Color.Orange)
+            };
+
+            // --- カメラ変数 ---
+            Camera3D camera = new Camera3D();
+            camera.Up = new Vector3(0.0f, 1.0f, 0.0f);
+            camera.FovY = 60.0f;
+            camera.Projection = CameraProjection.Perspective;
+
+            float cameraDistance = 10.0f;
+            float cameraYaw = 0.0f;
+            float cameraPitch = 0.3f;
+            float mouseSensitivity = 0.003f;
+
+			string uiText = "WASD: 移動 | Space: ジャンプ | ESC: マウス解除";
+			Font jpFont = FontHelper.LoadJapaneseFont(@"C:\Windows\Fonts\meiryo.ttc", 32, uiText);
+
+            while (!Raylib.WindowShouldClose())
+            {
+                float deltaTime = Raylib.GetFrameTime();
+
+                // 1. カメラ回転（マウス操作）
+                Vector2 mouseDelta = Raylib.GetMouseDelta();
+                cameraYaw -= mouseDelta.X * mouseSensitivity;
+                cameraPitch -= mouseDelta.Y * mouseSensitivity;
+                cameraPitch = Math.Clamp(cameraPitch, -1.4f, 1.4f);
+
+                // 2. 移動入力
+                Vector3 moveInput = Vector3.Zero;
+                if (Raylib.IsKeyDown(KeyboardKey.W)) moveInput.Z -= 1.0f;
+                if (Raylib.IsKeyDown(KeyboardKey.S)) moveInput.Z += 1.0f;
+                if (Raylib.IsKeyDown(KeyboardKey.A)) moveInput.X -= 1.0f; // 修正：Aで左移動
+                if (Raylib.IsKeyDown(KeyboardKey.D)) moveInput.X += 1.0f; // 修正：Dで右移動
+
+                // ----------------------------------------------------
+                // 3. 水平移動 ＋ 壁の押し戻し判定（修正版）
+                // ----------------------------------------------------
+                if (moveInput.LengthSquared() > 0)
+                {
+                    moveInput = Vector3.Normalize(moveInput);
+
+                    // 修正：カメラの右方向ベクトル（反転を解消）
+                    Vector3 camForward = new Vector3(MathF.Sin(cameraYaw), 0.0f, MathF.Cos(cameraYaw));
+                    Vector3 camRight = new Vector3(MathF.Cos(cameraYaw), 0.0f, -MathF.Sin(cameraYaw));
+
+                    Vector3 moveDirection = (camForward * moveInput.Z) + (camRight * moveInput.X);
+                    playerAngle = MathF.Atan2(moveDirection.X, moveDirection.Z);
+
+                    // X軸移動
+                    playerPos.X += moveDirection.X * moveSpeed * deltaTime;
+                    BoundingBox playerBoxX = GetPlayerBoundingBox(playerPos, playerSize);
+
+                    foreach (var block in blocks)
+                    {
+                        BoundingBox bBox = block.GetBoundingBox();
+                        // 足元より高い位置にある壁のみ判定（乗っている台座を壁判定しないための修正）
+                        if ((playerPos.Y - playerSize.Y / 2.0f) < bBox.Max.Y - 0.1f)
+                        {
+                            if (Raylib.CheckCollisionBoxes(playerBoxX, bBox))
+                            {
+                                playerPos.X -= moveDirection.X * moveSpeed * deltaTime;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Z軸移動
+                    playerPos.Z += moveDirection.Z * moveSpeed * deltaTime;
+                    BoundingBox playerBoxZ = GetPlayerBoundingBox(playerPos, playerSize);
+
+                    foreach (var block in blocks)
+                    {
+                        BoundingBox bBox = block.GetBoundingBox();
+                        // 足元より高い位置にある壁のみ判定
+                        if ((playerPos.Y - playerSize.Y / 2.0f) < bBox.Max.Y - 0.1f)
+                        {
+                            if (Raylib.CheckCollisionBoxes(playerBoxZ, bBox))
+                            {
+                                playerPos.Z -= moveDirection.Z * moveSpeed * deltaTime;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // ----------------------------------------------------
+                // 4. 重力・ジャンプ・着地判定
+                // ----------------------------------------------------
+                if (isGrounded && Raylib.IsKeyPressed(KeyboardKey.Space))
+                {
+                    velocityY = jumpForce;
+                    isGrounded = false;
+                }
+
+                if (!isGrounded)
+                {
+                    velocityY += gravity * deltaTime;
+                }
+
+                playerPos.Y += velocityY * deltaTime;
+                BoundingBox playerBoxY = GetPlayerBoundingBox(playerPos, playerSize);
+
+                float currentGroundHeight = groundY;
+                isGrounded = false;
+
+                foreach (var block in blocks)
+                {
+                    BoundingBox blockBox = block.GetBoundingBox();
+
+                    // プレイヤーの水平範囲がブロックの上にあるかチェック
+                    bool isOverBlockHorizontally = 
+                        (playerBoxY.Max.X > blockBox.Min.X && playerBoxY.Min.X < blockBox.Max.X) &&
+                        (playerBoxY.Max.Z > blockBox.Min.Z && playerBoxY.Min.Z < blockBox.Max.Z);
+
+                    if (isOverBlockHorizontally)
+                    {
+                        // 落下中に上面に着地
+                        if (velocityY <= 0.0f && (playerPos.Y - playerSize.Y / 2.0f) <= blockBox.Max.Y && (playerPos.Y - playerSize.Y / 2.0f) >= blockBox.Min.Y)
+                        {
+                            currentGroundHeight = Math.Max(currentGroundHeight, blockBox.Max.Y);
+                        }
+                        // ジャンプ中に下から頭をぶつける
+                        else if (velocityY > 0.0f && Raylib.CheckCollisionBoxes(playerBoxY, blockBox))
+                        {
+                            playerPos.Y = blockBox.Min.Y - playerSize.Y / 2.0f;
+                            velocityY = 0.0f;
+                        }
+                    }
+                }
+
+                // 着地処理
+                float feetY = playerPos.Y - (playerSize.Y / 2.0f);
+                if (feetY <= currentGroundHeight)
+                {
+                    isGrounded = true;
+                    playerPos.Y = currentGroundHeight + (playerSize.Y / 2.0f);
+                    velocityY = 0.0f;
+                }
+
+                // ----------------------------------------------------
+                // 5. カメラ位置更新
+                // ----------------------------------------------------
+                camera.Target = playerPos + new Vector3(0.0f, 0.5f, 0.0f);
+                camera.Position = camera.Target + new Vector3(
+                    cameraDistance * MathF.Sin(cameraYaw) * MathF.Cos(cameraPitch),
+                    cameraDistance * MathF.Sin(cameraPitch),
+                    cameraDistance * MathF.Cos(cameraYaw) * MathF.Cos(cameraPitch)
+                );
+
+                // ----------------------------------------------------
+                // 6. 描画処理
+                // ----------------------------------------------------
+                Raylib.BeginDrawing();
+                Raylib.ClearBackground(Color.SkyBlue);
+
+                Raylib.BeginMode3D(camera);
+
+                Raylib.DrawGrid(50, 2.0f);
+
+                foreach (var block in blocks)
+                {
+                    Raylib.DrawCubeV(block.Position, block.Size, block.Color);
+                    Raylib.DrawCubeWiresV(block.Position, block.Size, Color.Black);
+                }
+
+                Raylib.DrawCubeV(playerPos, playerSize, Color.Red);
+                Raylib.DrawCubeWiresV(playerPos, playerSize, Color.Maroon);
+
+                Vector3 noseOffset = new Vector3(MathF.Sin(playerAngle) * 0.6f, 0.5f, MathF.Cos(playerAngle) * 0.6f);
+                Raylib.DrawCubeV(playerPos + noseOffset, new Vector3(0.3f, 0.3f, 0.3f), Color.Yellow);
+
+                Raylib.EndMode3D();
+
+                Raylib.DrawFPS(10, 10);
+				Raylib.DrawTextEx(jpFont, uiText, new Vector2(10, 40), 20, 2, Color.White);
+                //Raylib.DrawText("WASD: 移動 | Space: ジャンプ | ESC: マウス解除", 10, 40, 20, Color.White);
+
+                Raylib.EndDrawing();
+            }
+
+
+			// 終了処理
+			Raylib.UnloadFont(jpFont);
+            Raylib.CloseWindow();
+        }
+
+        static BoundingBox GetPlayerBoundingBox(Vector3 pos, Vector3 size)
+        {
+            Vector3 halfSize = size / 2.0f;
+            return new BoundingBox(pos - halfSize, pos + halfSize);
+        }
+    }
+}
