@@ -1,0 +1,124 @@
+const int WIDTH = 60;
+const int HEIGHT = 8;
+
+bool screen[HEIGHT][WIDTH];
+
+const uint8_t FONT_T[7] = {
+  B11111,
+  B00100,
+  B00100,
+  B00100,
+  B00100,
+  B00100,
+  B00100
+};
+
+const uint8_t FONT_E[7] = {
+  B11111,
+  B10000,
+  B10000,
+  B11110,
+  B10000,
+  B10000,
+  B11111
+};
+
+const uint8_t FONT_S[7] = {
+  B01111,
+  B10000,
+  B10000,
+  B01110,
+  B00001,
+  B00001,
+  B11110
+};
+
+const uint8_t* getGlyph(char c)
+{
+  switch(c)
+  {
+    case 'T': return FONT_T;
+    case 'E': return FONT_E;
+    case 'S': return FONT_S;
+  }
+
+  return nullptr;
+}
+
+void clearScreen()
+{
+  for(int y=0; y<HEIGHT; y++)
+  {
+    for(int x=0; x<WIDTH; x++)
+    {
+      screen[y][x] = false;
+    }
+  }
+}
+
+void setPixel(int x, int y, bool state=true)
+{
+  if(x < 0 || x >= WIDTH) return;
+  if(y < 0 || y >= HEIGHT) return;
+
+  screen[y][x] = state;
+}
+
+void drawChar(int x0, int y0, char c)
+{
+  const uint8_t* glyph = getGlyph(c);
+
+  if(glyph == nullptr)
+    return;
+
+  for(int y=0; y<7; y++)
+  {
+    for(int x=0; x<5; x++)
+    {
+      if(glyph[y] & (1 << (4 - x)))
+      {
+        setPixel(x0 + x, y0 + y);
+      }
+    }
+  }
+}
+
+void drawString(int x, int y, const char* text)
+{
+  while(*text)
+  {
+    drawChar(x, y, *text);
+    x += 6;
+    text++;
+  }
+}
+
+void showScreen()
+{
+  Serial.println();
+
+  for(int y=0; y<HEIGHT; y++)
+  {
+    for(int x=0; x<WIDTH; x++)
+    {
+      Serial.print(screen[y][x] ? '#' : '.');
+    }
+
+    Serial.println();
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  clearScreen();
+
+  drawString(2, 0, "TEST");
+
+  showScreen();
+}
+
+void loop()
+{
+}
